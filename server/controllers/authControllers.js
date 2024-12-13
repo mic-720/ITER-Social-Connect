@@ -1,30 +1,18 @@
 const db = require("../firebase/firebaseConfig");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
+const axios = require("axios");
 const {
   collection,
   addDoc,
   query,
   where,
   getDocs,
-  updateDoc,
-  doc,
 } = require("firebase/firestore");
-const { cloudinary } = require("../cloudConfig");
 const {
   userSignupSchema,
   userSigninSchema,
 } = require("../validations/userValidations");
-
-// URL validation function
-const isValidUrl = (url, platform) => {
-  const regexes = {
-    linkedin: /^https?:\/\/(www\.)?linkedin\.com\/.*$/i,
-    github: /^https?:\/\/(www\.)?github\.com\/.*$/i,
-    twitter: /^https?:\/\/(www\.)?twitter\.com\/.*$/i,
-  };
-  return regexes[platform]?.test(url);
-};
 
 const generateAccessToken = (user) => {
   return jwt.sign(
@@ -81,11 +69,47 @@ const signup = async (req, res) => {
     const saltRounds = parseInt(process.env.SALT_ROUNDS, 10) || 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
+    let idCardUrl = null;
+
+    // Handle ID card upload using Discord bot
+    if (req.file) {
+      if (req.file.size > 3 * 1024 * 1024) {
+        return res
+          .status(400)
+          .json({ message: "ID card must not exceed 2 MB" });
+      }
+
+      try {
+        const botResponse = await axios.post(
+          `${process.env.DISCORD_BOT_URL}/upload`,
+          {
+            image: req.file.buffer.toString("base64"),
+            filename: req.file.originalname,
+          },
+          {
+            headers: {
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        idCardUrl = botResponse.data.url;
+      } catch (err) {
+        console.error("Error uploading ID card to Discord bot:", err);
+        return res
+          .status(500)
+          .json({ message: "Failed to upload ID card" });
+      }
+    } else {
+      return res.status(400).json({ message: "ID card is required" });
+    }
+
     const userDoc = await addDoc(collection(db, "users"), {
       email,
       password: hashedPassword,
       regNo,
       profileCompleted: false,
+      idCardUrl,
     });
 
     const accessToken = generateAccessToken({ userId: userDoc.id, email });
@@ -124,32 +148,6 @@ const completeProfile = async (req, res) => {
       return res.status(409).json({ message: "Username already taken" });
     }
 
-    // Validate social media links
-    if (linkedin && !isValidUrl(linkedin, "linkedin")) {
-      return res.status(400).json({ message: "Invalid LinkedIn URL" });
-    }
-    if (github && !isValidUrl(github, "github")) {
-      return res.status(400).json({ message: "Invalid GitHub URL" });
-    }
-    if (twitter && !isValidUrl(twitter, "twitter")) {
-      return res.status(400).json({ message: "Invalid Twitter URL" });
-    }
-
-    // Upload profile photo (if provided)
-    let profilePhotoUrl = null;
-    if (req.file) {
-      if (req.file.size > 2 * 1024 * 1024) {
-        return res
-          .status(400)
-          .json({ message: "Profile photo must not exceed 2 MB" });
-      }
-      const result = await cloudinary.uploader.upload(req.file.path, {
-        folder: "iter_profiles",
-        allowedFormats: ["png", "jpg", "jpeg"],
-      });
-      profilePhotoUrl = result.secure_url;
-    }
-
     const userRef = doc(db, "users", userId);
     await updateDoc(userRef, {
       username,
@@ -157,7 +155,6 @@ const completeProfile = async (req, res) => {
       github: github || "",
       linkedin: linkedin || "",
       twitter: twitter || "",
-      profilePhoto: profilePhotoUrl,
       profileCompleted: true,
     });
 
